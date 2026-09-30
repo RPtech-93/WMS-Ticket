@@ -234,6 +234,30 @@ def send_whatsapp_message(to_number, message_text):
         return None
 
 
+def show_typing_indicator(message_id):
+    """
+    Marks the incoming message as read (blue ticks) and shows a "typing..."
+    indicator to the sender while we process (AI calls, DB writes, etc).
+    WhatsApp auto-dismisses it after we reply, or after ~25 seconds -
+    whichever comes first. Best-effort only: if this fails, we just skip it
+    and continue processing normally (never blocks the actual ticket logic).
+    """
+    if not WHATSAPP_ACCESS_TOKEN or not message_id:
+        return
+    url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id,
+        "typing_indicator": {"type": "text"},
+    }
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=5)
+    except Exception as e:
+        print(f"[Typing Indicator Error] {e}")
+
+
 HELP_TEXT = (
     "Hi! This number is for logging WMS support tickets.\n\n"
     "To raise a ticket, please send a message with these details:\n\n"
@@ -255,39 +279,50 @@ def verify_webhook():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True, silent=True) or {}
     try:
-        value = data["entry"][0]["changes"][0]["value"]
-        messages = value.get("messages", [])
+        raw_data = request.get_json(force=True, silent=True) or {}
+        print(f"[RouteMobile Raw Payload]: {json.dumps(raw_data)}")
+    except Exception as e:
+        print(f"[Log Error]: {e}")
+        return jsonify({"status": "error", "reason": "invalid json"}), 200
+ 
+    # 1. Agar ye Delivery Status (MT) hai, toh bas 200 OK bhej do (Ticket nahi banana)
+    if "statuses" in raw_data:
+        return jsonify({"status": "ignored", "reason": "status update event"}), 200
+ 
+    # 2. Agar ye User ka Message (MO) hai, toh isko parse karo
+    try:
+        messages = raw_data.get("messages", [])
         if not messages:
             return jsonify({"status": "ignored", "reason": "no message content"}), 200
-
+ 
         message = messages[0]
-        msg_id = message.get("id")
+        msg_id = message.get("message_id") or message.get("id")
         if msg_id and msg_id in processed_message_ids:
             print(f"[Duplicate Webhook] {msg_id} already processed, skipping")
             return jsonify({"status": "ignored", "reason": "duplicate webhook delivery"}), 200
         if msg_id:
             processed_message_ids.add(msg_id)
-
+            show_typing_indicator(msg_id)
+ 
         message_text = message.get("text", {}).get("body", "")
         sender_number = message.get("from", "Unknown Number")
-        contacts = value.get("contacts", [])
+        contacts = raw_data.get("contacts", [])
         sender_name = contacts[0].get("profile", {}).get("name", sender_number) if contacts else sender_number
-        phone_number_id = value.get("metadata", {}).get("phone_number_id", "Unknown Source")
-    except (IndexError, AttributeError, KeyError):
+        # Phone number id ki jagah brand_msisdn use kar sakte hain
+        phone_number_id = raw_data.get("brand_msisdn", "Unknown Brand")
+ 
+    except (IndexError, AttributeError, KeyError) as err:
+        print(f"[Payload Parse Error]: {err}")
         return jsonify({"status": "error", "reason": "unexpected payload structure"}), 200
-
+ 
     if not message_text:
         return jsonify({"status": "ignored", "reason": "empty message"}), 200
-
+ 
+    # --- YAHAN SE TERA PURANA TICKET LOGGING WALA LOGIC WAISE HI CHALEGA ---
     fields = parse_ticket_message(message_text)
     looks_like_ticket = message_text.strip().startswith("#") or any(v.strip() for v in fields.values())
-
-    # Merge with a pending (previously incomplete) ticket from this sender, unless the new
-    # message clearly names a DIFFERENT Order ID/Warehouse (i.e. it's a new, unrelated ticket),
-    # or the new message is empty/casual (contributes nothing) - a plain "hello" should never
-    # be swallowed into a stale pending ticket.
+ 
     now = datetime.now()
     pending = pending_tickets.get(sender_number)
     if pending and looks_like_ticket and (now - pending["updated_at"]).total_seconds() <= PENDING_TICKET_TIMEOUT_MINUTES * 60:
@@ -303,15 +338,13 @@ def webhook():
             merged.update({k: v for k, v in fields.items() if v.strip()})
             fields = merged
             looks_like_ticket = True
-
+ 
     missing = get_missing_fields(fields)
-
+ 
     if missing and looks_like_ticket:
-        # Structurally confirmed ticket attempt - just fill gaps via AI, never silently drop.
         fields = ai_fill_missing_fields(message_text, fields)
         missing = get_missing_fields(fields)
     elif missing and not looks_like_ticket:
-        # Ambiguous (no #, no fields, no pending) - ask AI whether it's a ticket at all.
         ai_result = ai_classify_and_extract(message_text)
         if not ai_result["is_ticket"]:
             last_sent = last_help_sent.get(sender_number)
@@ -323,7 +356,7 @@ def webhook():
             if not fields.get(key, "").strip() and ai_result.get(key):
                 fields[key] = ai_result[key]
         missing = get_missing_fields(fields)
-
+ 
     if missing:
         pending_tickets[sender_number] = {"fields": fields, "updated_at": now}
         reply = (
@@ -333,11 +366,11 @@ def webhook():
         )
         send_whatsapp_message(sender_number, reply)
         return jsonify({"status": "rejected", "reason": "missing mandatory fields", "missing_fields": missing}), 200
-
+ 
     pending_tickets.pop(sender_number, None)
     duplicate_id = ai_check_duplicate(fields)
     ticket_id = log_ticket(phone_number_id, sender_name, sender_number, fields, duplicate_id)
-
+ 
     confirmation = f"✅ Your ticket has been successfully created.\nTicket ID: {ticket_id}"
     if duplicate_id:
         confirmation = (
@@ -346,7 +379,7 @@ def webhook():
             "our team will review both together."
         )
     send_whatsapp_message(sender_number, confirmation)
-
+ 
     return jsonify({"status": "logged", "ticket_id": ticket_id, "duplicate_of": duplicate_id,
                      "message": "Ticket successfully logged"}), 200
 
@@ -388,4 +421,5 @@ def home():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    debug_mode = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host="0.0.0.0", port=5000, debug=debug_mode)
