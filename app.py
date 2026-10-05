@@ -286,17 +286,36 @@ def webhook():
         print(f"[Log Error]: {e}")
         return jsonify({"status": "error", "reason": "invalid json"}), 200
  
-    # 1. Agar ye Delivery Status (MT) hai, toh bas 200 OK bhej do (Ticket nahi banana)
-    if "statuses" in raw_data:
-        return jsonify({"status": "ignored", "reason": "status update event"}), 200
+    # 1. Agar ye Delivery Status (MT) hai, toh bas 200 OK bhej do (Yahan ek extra bracket hata diya hai)
+    if "statuses" in raw_data and "entry" not in raw_data:
+        return jsonify({"status": "ignored", "reason": "status update event"}, 200)
  
-    # 2. Agar ye User ka Message (MO) hai, toh isko parse karo
+    # 2. Extract Message & Sender details supporting BOTH Meta format and RouteMobile flat format
     try:
-        messages = raw_data.get("messages", [])
-        if not messages:
-            return jsonify({"status": "ignored", "reason": "no message content"}), 200
+        message = None
+        contacts = []
+        phone_number_id = "Unknown Brand"
  
-        message = messages[0]
+        # Check if it's Standard Meta / WhatsApp Cloud API format (nested under entry -> changes -> value)
+        if "entry" in raw_data:
+            value = raw_data["entry"][0]["changes"][0]["value"]
+            messages = value.get("messages", [])
+            if not messages:
+                return jsonify({"status": "ignored", "reason": "no message content"}), 200
+            message = messages[0]
+            contacts = value.get("contacts", [])
+            phone_number_id = value.get("metadata", {}).get("phone_number_id", "Unknown Source")
+        # Otherwise check if it's RouteMobile flat format
+        elif "messages" in raw_data:
+            messages = raw_data.get("messages", [])
+            if not messages:
+                return jsonify({"status": "ignored", "reason": "no message content"}), 200
+            message = messages[0]
+            contacts = raw_data.get("contacts", [])
+            phone_number_id = raw_data.get("brand_msisdn", "Unknown Brand")
+        else:
+            return jsonify({"status": "ignored", "reason": "unknown payload structure"}), 200
+ 
         msg_id = message.get("message_id") or message.get("id")
         if msg_id and msg_id in processed_message_ids:
             print(f"[Duplicate Webhook] {msg_id} already processed, skipping")
@@ -307,10 +326,7 @@ def webhook():
  
         message_text = message.get("text", {}).get("body", "")
         sender_number = message.get("from", "Unknown Number")
-        contacts = raw_data.get("contacts", [])
         sender_name = contacts[0].get("profile", {}).get("name", sender_number) if contacts else sender_number
-        # Phone number id ki jagah brand_msisdn use kar sakte hain
-        phone_number_id = raw_data.get("brand_msisdn", "Unknown Brand")
  
     except (IndexError, AttributeError, KeyError) as err:
         print(f"[Payload Parse Error]: {err}")
@@ -318,70 +334,6 @@ def webhook():
  
     if not message_text:
         return jsonify({"status": "ignored", "reason": "empty message"}), 200
- 
-    # --- YAHAN SE TERA PURANA TICKET LOGGING WALA LOGIC WAISE HI CHALEGA ---
-    fields = parse_ticket_message(message_text)
-    looks_like_ticket = message_text.strip().startswith("#") or any(v.strip() for v in fields.values())
- 
-    now = datetime.now()
-    pending = pending_tickets.get(sender_number)
-    if pending and looks_like_ticket and (now - pending["updated_at"]).total_seconds() <= PENDING_TICKET_TIMEOUT_MINUTES * 60:
-        conflict = any(
-            pending["fields"].get(f, "").strip() and fields.get(f, "").strip()
-            and pending["fields"][f].strip().lower() != fields[f].strip().lower()
-            for f in ("Order ID", "Warehouse")
-        )
-        if conflict:
-            pending_tickets.pop(sender_number, None)
-        else:
-            merged = dict(pending["fields"])
-            merged.update({k: v for k, v in fields.items() if v.strip()})
-            fields = merged
-            looks_like_ticket = True
- 
-    missing = get_missing_fields(fields)
- 
-    if missing and looks_like_ticket:
-        fields = ai_fill_missing_fields(message_text, fields)
-        missing = get_missing_fields(fields)
-    elif missing and not looks_like_ticket:
-        ai_result = ai_classify_and_extract(message_text)
-        if not ai_result["is_ticket"]:
-            last_sent = last_help_sent.get(sender_number)
-            if not last_sent or (now - last_sent).total_seconds() > HELP_MESSAGE_COOLDOWN_MINUTES * 60:
-                send_whatsapp_message(sender_number, HELP_TEXT)
-                last_help_sent[sender_number] = now
-            return jsonify({"status": "ignored", "reason": "not a ticket (AI classified)"}), 200
-        for key in MESSAGE_FIELDS:
-            if not fields.get(key, "").strip() and ai_result.get(key):
-                fields[key] = ai_result[key]
-        missing = get_missing_fields(fields)
- 
-    if missing:
-        pending_tickets[sender_number] = {"fields": fields, "updated_at": now}
-        reply = (
-            "⚠️ Your ticket could not be created. The following required fields are missing:\n\n"
-            + "\n".join(f"- {f}" for f in missing)
-            + "\n\nYou can reply with just the missing information, or resend your message with the complete format."
-        )
-        send_whatsapp_message(sender_number, reply)
-        return jsonify({"status": "rejected", "reason": "missing mandatory fields", "missing_fields": missing}), 200
- 
-    pending_tickets.pop(sender_number, None)
-    duplicate_id = ai_check_duplicate(fields)
-    ticket_id = log_ticket(phone_number_id, sender_name, sender_number, fields, duplicate_id)
- 
-    confirmation = f"✅ Your ticket has been successfully created.\nTicket ID: {ticket_id}"
-    if duplicate_id:
-        confirmation = (
-            f"✅ Your ticket has been created.\nTicket ID: {ticket_id}\n\n"
-            f"⚠️ Note: This issue looks similar to an already open ticket ({duplicate_id}) — "
-            "our team will review both together."
-        )
-    send_whatsapp_message(sender_number, confirmation)
- 
-    return jsonify({"status": "logged", "ticket_id": ticket_id, "duplicate_of": duplicate_id,
-                     "message": "Ticket successfully logged"}), 200
 
 
 @app.route("/api/tickets", methods=["GET"])
