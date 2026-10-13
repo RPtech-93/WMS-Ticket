@@ -397,34 +397,21 @@ def ai_check_duplicate(fields):
 
 # ------------------------------------------------------------- WhatsApp
 
-def send_whatsapp_message(to_number, message_text):
-
+def send_whatsapp_message(to_number, message_text, target_phone_number_id=None):
+    active_phone_id = target_phone_number_id or PHONE_NUMBER_ID
     if not WHATSAPP_ACCESS_TOKEN:
-
         print("WARNING: WHATSAPP_ACCESS_TOKEN missing")
-
         return None
-
-    url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
-
+    url = f"https://graph.facebook.com/v21.0/{active_phone_id}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
-
     payload = {"messaging_product": "whatsapp", "to": to_number, "type": "text", "text": {"body": message_text}}
-
     try:
-
         resp = requests.post(url, headers=headers, json=payload, timeout=10)
-
         print(f"[WhatsApp Send] Status: {resp.status_code}, Response: {resp.text}")
-
         return resp.json()
-
     except Exception as e:
-
         print(f"[WhatsApp Send Error] {e}")
-
         return None
-
 
 def show_typing_indicator(message_id):
 
