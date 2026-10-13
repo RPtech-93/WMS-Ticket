@@ -28,7 +28,8 @@ WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+ 
 
 MESSAGE_FIELDS = MANDATORY_FIELDS = [
 
