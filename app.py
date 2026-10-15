@@ -400,11 +400,21 @@ def ai_check_duplicate(fields):
 def send_whatsapp_message(to_number, message_text, target_phone_number_id=None):
     active_phone_id = target_phone_number_id or PHONE_NUMBER_ID
     if not WHATSAPP_ACCESS_TOKEN:
-        print("WARNING: WHATSAPP_ACCESS_TOKEN missing")
+        print("[WhatsApp Send] ERROR: WHATSAPP_ACCESS_TOKEN missing")
         return None
+    # RouteMobile Cloud API Endpoint format (As per their official collection)
     url = f"https://graph.facebook.com/v21.0/{active_phone_id}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
-    payload = {"messaging_product": "whatsapp", "to": to_number, "type": "text", "text": {"body": message_text}}
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to_number,
+        "type": "text",
+        "text": {"body": message_text}
+    }
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=10)
         print(f"[WhatsApp Send] Status: {resp.status_code}, Response: {resp.text}")
